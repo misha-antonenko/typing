@@ -218,9 +218,11 @@ class TutorTUI:
         curses.start_color()
         curses.use_default_colors()
         # Define colors
-        curses.init_pair(1, curses.COLOR_GREEN, -1)  # Correct
-        curses.init_pair(2, curses.COLOR_RED, -1)  # Incorrect
-        curses.init_pair(3, curses.COLOR_CYAN, -1)  # Remaining
+        curses.init_pair(1, curses.COLOR_GREEN, -1)  # Correct (Green on default)
+        curses.init_pair(
+            2, curses.COLOR_WHITE, curses.COLOR_RED
+        )  # Mistake (White on Red)
+        curses.init_pair(3, curses.COLOR_CYAN, -1)  # Remaining (Cyan on default)
 
         stdscr.nodelay(False)
         curses.curs_set(1)
@@ -261,22 +263,30 @@ class TutorTUI:
             )
 
             stats_str = f" WPM: {wpm:3.0f} | Accuracy: {accuracy:3.0f}% "
-            stdscr.addstr(
-                0, max(0, w - len(stats_str) - 2), stats_str, curses.A_REVERSE
-            )
-            stdscr.addstr(0, 0, " [Ctrl-C] Next Lesson | [ESC] Exit ", curses.A_DIM)
+            try:
+                stdscr.addstr(
+                    0, max(0, w - len(stats_str) - 2), stats_str, curses.A_REVERSE
+                )
+                stdscr.addstr(0, 0, " [Ctrl-C] Next Lesson | [ESC] Exit ", curses.A_DIM)
+            except curses.error:
+                pass
 
-            # Draw text
-            y_start = h // 2
-            x_start = max(0, (w - len(full_text)) // 2)
+            # Calculate wrapped lines
+            max_text_width = min(w - 4, 80)  # Bound width for readability
+            x_offset = (w - max_text_width) // 2
+            y_offset = h // 3
 
+            current_y = y_offset
+            current_x = x_offset
+
+            # Draw text with wrapping
             for i, char in enumerate(full_text):
                 color = curses.color_pair(3)
                 if i < len(typed_text):
                     if typed_text[i] == full_text[i]:
                         color = curses.color_pair(1)
                     else:
-                        color = curses.color_pair(2) | curses.A_BOLD
+                        color = curses.color_pair(2)
 
                 # Highlight cursor position
                 attr = color
@@ -284,9 +294,14 @@ class TutorTUI:
                     attr |= curses.A_UNDERLINE | curses.A_BOLD
 
                 try:
-                    stdscr.addch(y_start, x_start + i, char, attr)
+                    stdscr.addch(current_y, current_x, char, attr)
                 except curses.error:
                     pass
+
+                current_x += 1
+                if current_x >= x_offset + max_text_width:
+                    current_x = x_offset
+                    current_y += 1
 
             stdscr.refresh()
 
@@ -298,7 +313,10 @@ class TutorTUI:
             if ch == 27:  # ESC
                 sys.exit(0)
 
-            if ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:
+            if ch == curses.KEY_RESIZE:
+                continue
+
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
                 if typed_text:
                     typed_text = typed_text[:-1]
                 continue
