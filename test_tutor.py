@@ -28,10 +28,12 @@ def test_weighted_sampling_on_mistakes(stats_manager, lesson_generator):
     stats_manager.record_mistake("thought", 1, "x")
     stats_manager.record_mistake("think", 1, "y")
     stats_manager.record_mistake("these", 1, "z")
+    stats_manager.record_mistake("these", 0, "z")
 
     weights = stats_manager.get_bigram_weights()
     assert "th" in weights
     assert weights["th"] > 0
+    assert weights["^t"] > 0
 
     # Generate lesson and check for bias
     # Since we only have 3 mistakes, and dictionary is large,
