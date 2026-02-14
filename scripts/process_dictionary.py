@@ -1,7 +1,7 @@
-import sqlite3
-import xml.etree.ElementTree as ET
 import os
+import sqlite3
 import sys
+import xml.etree.ElementTree as ET
 
 
 def process_dictionary(input_file, db_file):
@@ -19,7 +19,7 @@ def process_dictionary(input_file, db_file):
     # Use a generator to yield titles from the file
     def get_entries():
         word_id = 1
-        with open(input_file, "r", encoding="utf-8") as f:
+        with open(input_file, encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue

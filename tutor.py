@@ -1,9 +1,11 @@
-import sqlite3
-import time
+import curses
 import math
 import random
-import curses
+import sqlite3
 import sys
+import time
+from dataclasses import dataclass
+from typing import Any
 
 # Constants
 STATS_DB = "stats.db"
@@ -12,12 +14,20 @@ WORDS_PER_LESSON = 10
 EXCLUDE_RECENT_MINUTES = 5
 
 
+@dataclass(frozen=True)
+class LessonWord:
+    word_id: int
+    original: str
+    display: str
+    separator: str
+
+
 class StatsManager:
-    def __init__(self, db_path=STATS_DB):
+    def __init__(self, db_path: str = STATS_DB) -> None:
         self.db_path = db_path
         self._init_db()
 
-    def _init_db(self):
+    def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -36,7 +46,7 @@ class StatsManager:
             """)
             conn.commit()
 
-    def record_mistake(self, word, index, typed_char):
+    def record_mistake(self, word: str, index: int, typed_char: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -45,7 +55,7 @@ class StatsManager:
             )
             conn.commit()
 
-    def record_word_typed(self, word_id):
+    def record_word_typed(self, word_id: int) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -54,7 +64,7 @@ class StatsManager:
             )
             conn.commit()
 
-    def get_bigram_weights(self):
+    def get_bigram_weights(self) -> dict[str, float]:
         now = time.time()
         one_week = 7 * 24 * 3600
 
@@ -66,7 +76,7 @@ class StatsManager:
             )
             rows = cursor.fetchall()
 
-        weights = {}
+        weights: dict[str, float] = {}
         for display_word, index, _, ts in rows:
             # Reconstruct the expected character from the displayed word at the recorded index.
             # This is why we store the displayed word.
@@ -81,7 +91,7 @@ class StatsManager:
 
         return weights
 
-    def get_recently_typed_ids(self):
+    def get_recently_typed_ids(self) -> set[int]:
         cutoff = time.time() - (EXCLUDE_RECENT_MINUTES * 60)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -92,15 +102,17 @@ class StatsManager:
 
 
 class LessonGenerator:
-    def __init__(self, stats_manager, dict_db_path=DICTIONARY_DB):
+    def __init__(
+        self, stats_manager: StatsManager, dict_db_path: str = DICTIONARY_DB
+    ) -> None:
         self.stats_manager = stats_manager
         self.dict_db_path = dict_db_path
 
-    def generate_lesson(self):
+    def generate_lesson(self) -> list[LessonWord]:
         bigram_weights = self.stats_manager.get_bigram_weights()
         recently_typed = self.stats_manager.get_recently_typed_ids()
 
-        words = []
+        words: list[tuple[int, str]] = []
         if not bigram_weights:
             # Random sample if no mistakes
             words = self._sample_random(WORDS_PER_LESSON, recently_typed)
@@ -119,25 +131,31 @@ class LessonGenerator:
 
         return self._format_lesson(words)
 
-    def _sample_random(self, count, exclude_ids):
+    def _sample_random(
+        self, count: int, exclude_ids: set[int]
+    ) -> list[tuple[int, str]]:
         with sqlite3.connect(self.dict_db_path) as conn:
             cursor = conn.cursor()
             query = "SELECT word_id, title FROM articles"
+            params: list[Any] = []
             if exclude_ids:
                 placeholders = ",".join(["?"] * len(exclude_ids))
                 query += f" WHERE word_id NOT IN ({placeholders})"
+                params.extend(exclude_ids)
             query += " ORDER BY RANDOM() LIMIT ?"
+            params.append(count)
 
-            params = list(exclude_ids) + [count]
             cursor.execute(query, params)
             return cursor.fetchall()
 
-    def _sample_weighted(self, count, bigram_weights, exclude_ids):
+    def _sample_weighted(
+        self, count: int, bigram_weights: dict[str, float], exclude_ids: set[int]
+    ) -> list[tuple[int, str]]:
         # Select bigrams to target
         bigrams = list(bigram_weights.keys())
         weights = list(bigram_weights.values())
 
-        sampled_words = []
+        sampled_words: list[tuple[int, str]] = []
         used_word_ids = set(exclude_ids)
 
         # We need 10 words. We'll pick bigrams proportional to weights.
@@ -153,12 +171,13 @@ class LessonGenerator:
                     JOIN articles a ON b.word_id = a.word_id
                     WHERE b.bigram = ? 
                 """
+                params: list[Any] = [bg]
                 if used_word_ids:
                     placeholders = ",".join(["?"] * len(used_word_ids))
                     query += f" AND b.word_id NOT IN ({placeholders})"
+                    params.extend(used_word_ids)
                 query += " ORDER BY RANDOM() LIMIT 1"
 
-                params = [bg] + list(used_word_ids)
                 cursor.execute(query, params)
                 row = cursor.fetchone()
                 if row:
@@ -173,9 +192,9 @@ class LessonGenerator:
 
         return sampled_words
 
-    def _format_lesson(self, words):
+    def _format_lesson(self, words: list[tuple[int, str]]) -> list[LessonWord]:
         # words is list of (word_id, title)
-        lesson_data = []
+        lesson_data: list[LessonWord] = []
         punctuations = [",", ".", ";", ":", "!", "?"]
 
         for i, (word_id, title) in enumerate(words):
@@ -199,25 +218,27 @@ class LessonGenerator:
                     sep = " "
 
             lesson_data.append(
-                {
-                    "word_id": word_id,
-                    "original": title,
-                    "display": processed,
-                    "separator": sep,
-                }
+                LessonWord(
+                    word_id=word_id,
+                    original=title,
+                    display=processed,
+                    separator=sep,
+                )
             )
         return lesson_data
 
 
 class TutorTUI:
-    def __init__(self, stats_manager, lesson_generator):
+    def __init__(
+        self, stats_manager: StatsManager, lesson_generator: LessonGenerator
+    ) -> None:
         self.stats_manager = stats_manager
         self.lesson_generator = lesson_generator
 
-    def run(self):
+    def run(self) -> None:
         curses.wrapper(self._main)
 
-    def _main(self, stdscr):
+    def _main(self, stdscr: Any) -> None:
         curses.start_color()
         curses.use_default_colors()
         # Define colors
@@ -227,7 +248,7 @@ class TutorTUI:
         )  # Mistake (White on Red)
         curses.init_pair(3, curses.COLOR_CYAN, -1)  # Remaining (Cyan on default)
 
-        stdscr.nodelay(False)
+        stdscr.nodelay(False)  # noqa: FBT003
         curses.curs_set(1)
 
         while True:
@@ -235,20 +256,22 @@ class TutorTUI:
             if not self._run_lesson(stdscr, lesson):
                 break  # User exit or error
 
-    def _run_lesson(self, stdscr, lesson):
+    def _run_lesson(self, stdscr: Any, lesson: list[LessonWord]) -> bool:
         # Construct full lesson string
         full_text = ""
-        word_mapping = []  # (char_idx_start, char_idx_end, word_obj)
+        word_mapping: list[
+            tuple[int, int, LessonWord]
+        ] = []  # (char_idx_start, char_idx_end, word_obj)
 
         for w in lesson:
             start = len(full_text)
-            full_text += w["display"]
+            full_text += w.display
             end = len(full_text)
             word_mapping.append((start, end, w))
-            full_text += w["separator"]
+            full_text += w.separator
 
         typed_text = ""
-        completed_word_ids = set()
+        completed_word_ids: set[int] = set()
         start_time = time.time()
         mistakes_count = 0
 
@@ -334,30 +357,32 @@ class TutorTUI:
             if char_typed != full_text[current_idx]:
                 mistakes_count += 1
                 # Find which word this belongs to
-                target_word = None
+                target_word: LessonWord | None = None
+                word_start = 0
                 for start, end, wo in word_mapping:
                     if start <= current_idx < end:
                         target_word = wo
+                        word_start = start
                         break
 
                 if target_word:
                     self.stats_manager.record_mistake(
-                        target_word["display"], current_idx - start, char_typed
+                        target_word.display, current_idx - word_start, char_typed
                     )
 
             typed_text += char_typed
 
             # Check for word completion
-            for start, end, wo in word_mapping:
-                if len(typed_text) == end and wo["word_id"] not in completed_word_ids:
-                    self.stats_manager.record_word_typed(wo["word_id"])
-                    completed_word_ids.add(wo["word_id"])
+            for _, end, wo in word_mapping:
+                if len(typed_text) == end and wo.word_id not in completed_word_ids:
+                    self.stats_manager.record_word_typed(wo.word_id)
+                    completed_word_ids.add(wo.word_id)
                     break
 
         return True
 
 
-def main():
+def main() -> None:
     stats_mgr = StatsManager()
     lesson_gen = LessonGenerator(stats_mgr)
     tui = TutorTUI(stats_mgr, lesson_gen)

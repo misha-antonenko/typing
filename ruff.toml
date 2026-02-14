@@ -1,0 +1,27 @@
+# line-length = 100
+indent-width = 4
+
+src = ["."]
+
+[lint]
+extend-select = [
+    "A",
+    "ARG",
+    "ASYNC",
+    "B",
+    "FBT",
+    "G",
+    "I",
+    "NPY",
+    "PIE",
+    "RUF",
+    "SLF",
+    "TCH",
+    "UP",
+]
+extend-ignore = ["RUF018", "G004", "E402"]
+fixable = ["ALL"]
+unfixable = []
+
+# [format]
+# quote-style = "single"
