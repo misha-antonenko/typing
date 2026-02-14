@@ -1,6 +1,7 @@
 import curses
 import math
 import random
+import re
 import sqlite3
 import sys
 import time
@@ -345,6 +346,52 @@ class TutorTUI:
             if not self._run_lesson(stdscr, lesson):
                 break  # User exit or error
 
+    def _calculate_layout(self, text: str, max_width: int) -> list[tuple[int, int]]:
+        """Returns list of (y, x) relative to (0, 0) for each character."""
+        layout: list[tuple[int, int]] = []
+        current_y = 0
+        current_x = 0
+
+        # Split by spaces but keep the spaces
+        parts = re.split(r"(\s+)", text)
+
+        for part in parts:
+            if not part:
+                continue
+
+            part_len = len(part)
+
+            # If it's whitespace, it might trigger a wrap if it's not the start of a line
+            # but usually we just append it and let the NEXT word decide if it fits.
+            # Standard logic: if a word doesn't fit, it goes to next line.
+            # If the part is NOT whitespace and doesn't fit:
+            if not part.isspace():
+                if current_x + part_len > max_width and current_x > 0:
+                    current_y += 1
+                    current_x = 0
+
+            # If the word itself is longer than max_width, we must break it
+            if not part.isspace() and part_len > max_width:
+                for _ in part:
+                    layout.append((current_y, current_x))
+                    current_x += 1
+                    if current_x >= max_width:
+                        current_x = 0
+                        current_y += 1
+                continue
+
+            # Otherwise, just add it character by character
+            for _ in part:
+                # If we are at the end of the line and the character is whitespace,
+                # we don't necessarily HAVE to wrap before it, but for simplicity:
+                if current_x >= max_width:
+                    current_x = 0
+                    current_y += 1
+                layout.append((current_y, current_x))
+                current_x += 1
+
+        return layout
+
     def _run_lesson(self, stdscr: Any, lesson: list[LessonWord]) -> bool:
         session = LessonSession(lesson, self.stats_manager)
 
@@ -368,8 +415,7 @@ class TutorTUI:
             x_offset = (w - max_text_width) // 2
             y_offset = h // 3
 
-            current_y = y_offset
-            current_x = x_offset
+            layout = self._calculate_layout(session.full_text, max_text_width)
 
             # Draw text with wrapping
             for i, char in enumerate(session.full_text):
@@ -385,15 +431,12 @@ class TutorTUI:
                 if i == len(session.typed_text):
                     attr |= curses.A_UNDERLINE | curses.A_BOLD
 
-                try:
-                    stdscr.addch(current_y, current_x, char, attr)
-                except curses.error:
-                    pass
-
-                current_x += 1
-                if current_x >= x_offset + max_text_width:
-                    current_x = x_offset
-                    current_y += 1
+                if i < len(layout):
+                    ry, rx = layout[i]
+                    try:
+                        stdscr.addch(y_offset + ry, x_offset + rx, char, attr)
+                    except curses.error:
+                        pass
 
             stdscr.refresh()
 
