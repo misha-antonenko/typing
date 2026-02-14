@@ -39,7 +39,7 @@ def create_bigram_index(db_path):
             continue
 
         # Add boundaries according to the inspiration script: '^' || word || '$'
-        word_with_boundaries = f"^{title}$"
+        word_with_boundaries = f"^{title.lower()}$"
 
         # Extract bigrams and count their occurrences in the current word
         bigrams = [
