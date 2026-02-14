@@ -39,6 +39,8 @@ def process_dictionary(input_file, db_file):
                         title = root.get("d:title")
 
                     if title:
+                        if "^" in title or "$" in title:
+                            continue
                         yield (title,)
                 except ET.ParseError as e:
                     print(f"Error parsing line: {e}", file=sys.stderr)
