@@ -60,19 +60,20 @@ class StatsManager:
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT word, char_index, timestamp FROM mistakes")
+            # Retrieve the display word, the index of the mistake, and the character the user typed
+            cursor.execute(
+                "SELECT word, char_index, typed_char, timestamp FROM mistakes"
+            )
             rows = cursor.fetchall()
 
         weights = {}
-        for word, index, ts in rows:
-            # Mistake happened at index. Bigram is word[index-1:index+1]
-            # Use boundaries if necessary? The user mentioned bigrams.
-            # Usually a typing mistake "ab" typed as "ax" means the transition a->b is hard.
-            # So the bigram is word[index-1:index+1] (if index > 0)
+        for display_word, index, _, ts in rows:
+            # Reconstruct the expected character from the displayed word at the recorded index.
+            # This is why we store the displayed word.
             if index > 0:
-                bigram = word[index - 1 : index + 1]
+                bigram = display_word[index - 1 : index + 1].lower()
             else:
-                bigram = f"^{word[0]}"  # Start of word boundary
+                bigram = f"^{display_word[0].lower()}"
 
             t_weeks = (ts - now) / one_week
             weight = math.exp(t_weeks)
@@ -179,13 +180,15 @@ class LessonGenerator:
 
         for i, (word_id, title) in enumerate(words):
             # Random capitalization
-            mode = random.choice(["lower", "capitalize", "upper"])
-            if mode == "capitalize":
+            mode = random.randint(0, 3)
+            if mode == 0:
                 processed = title.capitalize()
-            elif mode == "upper":
+            elif mode == 1:
                 processed = title.upper()
-            else:
+            elif mode == 2:
                 processed = title.lower()
+            else:
+                processed = title
 
             # Random punctuation
             sep = ""
@@ -255,14 +258,14 @@ class TutorTUI:
 
             # Draw stats
             elapsed = time.time() - start_time
-            wpm = (len(typed_text) / 5) / (elapsed / 60) if elapsed > 0 else 0
+            cps = len(typed_text) / elapsed if elapsed > 0 else 0
             accuracy = (
                 ((len(typed_text) - mistakes_count) / len(typed_text) * 100)
                 if typed_text
                 else 100
             )
 
-            stats_str = f" WPM: {wpm:3.0f} | Accuracy: {accuracy:3.0f}% "
+            stats_str = f" CPS: {cps:4.1f} | Accuracy: {accuracy:3.0f}% "
             try:
                 stdscr.addstr(
                     0, max(0, w - len(stats_str) - 2), stats_str, curses.A_REVERSE
@@ -308,7 +311,7 @@ class TutorTUI:
             try:
                 ch = stdscr.getch()
             except KeyboardInterrupt:
-                return True  # Loop back to next lesson
+                return True  # Next lesson
 
             if ch == 27:  # ESC
                 sys.exit(0)
@@ -339,7 +342,7 @@ class TutorTUI:
 
                 if target_word:
                     self.stats_manager.record_mistake(
-                        target_word["original"], current_idx - start, char_typed
+                        target_word["display"], current_idx - start, char_typed
                     )
 
             typed_text += char_typed

@@ -1,4 +1,5 @@
 import pytest
+import sqlite3
 from tutor import StatsManager, LessonGenerator
 
 
@@ -23,8 +24,7 @@ def test_initial_lesson_generation(lesson_generator):
 
 
 def test_weighted_sampling_on_mistakes(stats_manager, lesson_generator):
-    # Simulate mistakes on bigram 'th'
-    # 'thought' -> index 1 is 'th'
+    # Simulate mistakes on bigram 'th' (displayed as 'th')
     stats_manager.record_mistake("thought", 1, "x")
     stats_manager.record_mistake("think", 1, "y")
     stats_manager.record_mistake("these", 1, "z")
@@ -42,6 +42,16 @@ def test_weighted_sampling_on_mistakes(stats_manager, lesson_generator):
     th_count = sum(1 for w in lesson if "th" in w["original"].lower())
     # Given we k=10 from 1 bigram weight, it should be quite high
     assert th_count > 0
+
+
+def test_mistake_recording_uses_display_word(stats_manager, lesson_generator):
+    # If the system expects 'T' and user types 'x', it should record 'T'.
+    stats_manager.record_mistake("Test", 0, "x")
+    with sqlite3.connect(stats_manager.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT word, typed_char FROM mistakes")
+        row = cursor.fetchone()
+        assert row == ("Test", "x")
 
 
 def test_exclusion_of_recently_typed_words(stats_manager, lesson_generator):
