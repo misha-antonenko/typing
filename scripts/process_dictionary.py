@@ -12,12 +12,13 @@ def process_dictionary(input_file, db_file):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
-    # Create table with title column
+    # Create table with title and word_id columns
     cursor.execute("DROP TABLE IF EXISTS articles")
-    cursor.execute("CREATE TABLE articles (title TEXT)")
+    cursor.execute("CREATE TABLE articles (word_id INTEGER PRIMARY KEY, title TEXT)")
 
     # Use a generator to yield titles from the file
-    def get_titles():
+    def get_entries():
+        word_id = 1
         with open(input_file, "r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
@@ -28,9 +29,6 @@ def process_dictionary(input_file, db_file):
                     root = ET.fromstring(line.strip())
                     # The title is in the 'd:title' attribute of the root <d:entry> tag
                     # The namespace is http://www.apple.com/DTDs/DictionaryService-1.0.rng
-                    # But ET.fromstring might not handle the 'd:' prefix easily without namespace map
-                    # However, looking at head.txt, 'd:title' is the attribute name
-                    # Let's try to get it directly or with namespace
                     title = root.get(
                         "{http://www.apple.com/DTDs/DictionaryService-1.0.rng}title"
                     )
@@ -41,7 +39,8 @@ def process_dictionary(input_file, db_file):
                     if title:
                         if "^" in title or "$" in title:
                             continue
-                        yield (title,)
+                        yield (word_id, title)
+                        word_id += 1
                 except ET.ParseError as e:
                     print(f"Error parsing line: {e}", file=sys.stderr)
                     continue
@@ -51,17 +50,19 @@ def process_dictionary(input_file, db_file):
     batch = []
     count = 0
 
-    for title_tuple in get_titles():
-        batch.append(title_tuple)
+    for entry in get_entries():
+        batch.append(entry)
         if len(batch) >= batch_size:
-            cursor.executemany("INSERT INTO articles (title) VALUES (?)", batch)
+            cursor.executemany(
+                "INSERT INTO articles (word_id, title) VALUES (?, ?)", batch
+            )
             conn.commit()
             count += len(batch)
             print(f"Processed {count} entries...", end="\r")
             batch = []
 
     if batch:
-        cursor.executemany("INSERT INTO articles (title) VALUES (?)", batch)
+        cursor.executemany("INSERT INTO articles (word_id, title) VALUES (?, ?)", batch)
         conn.commit()
         count += len(batch)
         print(f"Processed {count} entries total.")
