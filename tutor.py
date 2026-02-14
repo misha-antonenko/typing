@@ -195,9 +195,9 @@ class LessonGenerator:
     def _format_lesson(self, words: list[tuple[int, str]]) -> list[LessonWord]:
         # words is list of (word_id, title)
         lesson_data: list[LessonWord] = []
-        punctuations = [",", ".", ";", ":", "!", "?"]
+        punctuations = ["", ",", ".", ";", ":", "!", "?"]
 
-        for i, (word_id, title) in enumerate(words):
+        for word_id, title in words:
             # Random capitalization
             mode = random.randint(0, 3)
             if mode == 0:
@@ -210,12 +210,7 @@ class LessonGenerator:
                 processed = title
 
             # Random punctuation
-            sep = ""
-            if i < len(words) - 1:
-                if random.random() < 0.3:
-                    sep = random.choice(punctuations) + " "
-                else:
-                    sep = " "
+            sep = random.choice(punctuations) + " "
 
             lesson_data.append(
                 LessonWord(
