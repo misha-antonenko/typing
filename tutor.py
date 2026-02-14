@@ -228,6 +228,100 @@ class LessonGenerator:
         return lesson_data
 
 
+class LessonSession:
+    def __init__(
+        self,
+        lesson: list[LessonWord],
+        stats_manager: StatsManager,
+        start_time: float | None = None,
+    ) -> None:
+        self.lesson = lesson
+        self.stats_manager = stats_manager
+        self.full_text = ""
+        self.word_mapping: list[tuple[int, int, LessonWord]] = []
+        self._build_mapping()
+
+        self.typed_text = ""
+        self.completed_word_ids: set[int] = set()
+        self.start_time = start_time if start_time is not None else time.time()
+        self.mistakes_count = 0
+        self.total_typed_count = 0
+
+    def _build_mapping(self) -> None:
+        text = ""
+        for w in self.lesson:
+            start = len(text)
+            text += w.display
+            end = len(text)
+            self.word_mapping.append((start, end, w))
+            text += w.separator
+        self.full_text = text
+
+    def handle_key(self, ch: int) -> bool:
+        """Returns True if the lesson should continue, False if it's finished."""
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            if self.typed_text:
+                self.typed_text = self.typed_text[:-1]
+            return True
+
+        if ch < 0 or ch > 255:
+            return True
+
+        char_typed = chr(ch)
+        current_idx = len(self.typed_text)
+
+        if current_idx >= len(self.full_text):
+            return False
+
+        self.total_typed_count += 1
+
+        # Check for mistake
+        if char_typed != self.full_text[current_idx]:
+            self.mistakes_count += 1
+            # Find which word this belongs to
+            target_word: LessonWord | None = None
+            word_start = 0
+            for start, end, wo in self.word_mapping:
+                if start <= current_idx < end:
+                    target_word = wo
+                    word_start = start
+                    break
+
+            if target_word:
+                self.stats_manager.record_mistake(
+                    target_word.display, current_idx - word_start, char_typed
+                )
+
+        self.typed_text += char_typed
+
+        # Check for word completion
+        for _, end, wo in self.word_mapping:
+            if (
+                len(self.typed_text) == end
+                and wo.word_id not in self.completed_word_ids
+            ):
+                self.stats_manager.record_word_typed(wo.word_id)
+                self.completed_word_ids.add(wo.word_id)
+                break
+
+        return len(self.typed_text) < len(self.full_text)
+
+    def get_stats(self) -> tuple[float, float]:
+        """Returns (cps, accuracy)."""
+        elapsed = time.time() - self.start_time
+        cps = len(self.typed_text) / elapsed if elapsed > 0 else 0
+        accuracy = (
+            (
+                (self.total_typed_count - self.mistakes_count)
+                / self.total_typed_count
+                * 100
+            )
+            if self.total_typed_count > 0
+            else 100.0
+        )
+        return cps, accuracy
+
+
 class TutorTUI:
     def __init__(
         self, stats_manager: StatsManager, lesson_generator: LessonGenerator
@@ -257,37 +351,14 @@ class TutorTUI:
                 break  # User exit or error
 
     def _run_lesson(self, stdscr: Any, lesson: list[LessonWord]) -> bool:
-        # Construct full lesson string
-        full_text = ""
-        word_mapping: list[
-            tuple[int, int, LessonWord]
-        ] = []  # (char_idx_start, char_idx_end, word_obj)
+        session = LessonSession(lesson, self.stats_manager)
 
-        for w in lesson:
-            start = len(full_text)
-            full_text += w.display
-            end = len(full_text)
-            word_mapping.append((start, end, w))
-            full_text += w.separator
-
-        typed_text = ""
-        completed_word_ids: set[int] = set()
-        start_time = time.time()
-        mistakes_count = 0
-
-        while len(typed_text) < len(full_text):
+        while True:
             stdscr.erase()
             h, w = stdscr.getmaxyx()
 
             # Draw stats
-            elapsed = time.time() - start_time
-            cps = len(typed_text) / elapsed if elapsed > 0 else 0
-            accuracy = (
-                ((len(typed_text) - mistakes_count) / len(typed_text) * 100)
-                if typed_text
-                else 100
-            )
-
+            cps, accuracy = session.get_stats()
             stats_str = f" CPS: {cps:4.1f} | Accuracy: {accuracy:3.0f}% "
             try:
                 stdscr.addstr(
@@ -306,17 +377,17 @@ class TutorTUI:
             current_x = x_offset
 
             # Draw text with wrapping
-            for i, char in enumerate(full_text):
+            for i, char in enumerate(session.full_text):
                 color = curses.color_pair(3)
-                if i < len(typed_text):
-                    if typed_text[i] == full_text[i]:
+                if i < len(session.typed_text):
+                    if session.typed_text[i] == session.full_text[i]:
                         color = curses.color_pair(1)
                     else:
                         color = curses.color_pair(2)
 
                 # Highlight cursor position
                 attr = color
-                if i == len(typed_text):
+                if i == len(session.typed_text):
                     attr |= curses.A_UNDERLINE | curses.A_BOLD
 
                 try:
@@ -342,42 +413,8 @@ class TutorTUI:
             if ch == curses.KEY_RESIZE:
                 continue
 
-            if ch in (curses.KEY_BACKSPACE, 127, 8):
-                if typed_text:
-                    typed_text = typed_text[:-1]
-                continue
-
-            if ch < 0 or ch > 255:
-                continue
-
-            char_typed = chr(ch)
-            current_idx = len(typed_text)
-
-            # Check for mistake
-            if char_typed != full_text[current_idx]:
-                mistakes_count += 1
-                # Find which word this belongs to
-                target_word: LessonWord | None = None
-                word_start = 0
-                for start, end, wo in word_mapping:
-                    if start <= current_idx < end:
-                        target_word = wo
-                        word_start = start
-                        break
-
-                if target_word:
-                    self.stats_manager.record_mistake(
-                        target_word.display, current_idx - word_start, char_typed
-                    )
-
-            typed_text += char_typed
-
-            # Check for word completion
-            for _, end, wo in word_mapping:
-                if len(typed_text) == end and wo.word_id not in completed_word_ids:
-                    self.stats_manager.record_word_typed(wo.word_id)
-                    completed_word_ids.add(wo.word_id)
-                    break
+            if not session.handle_key(ch):
+                break
 
         return True
 

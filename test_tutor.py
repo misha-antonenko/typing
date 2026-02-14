@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from tutor import LessonGenerator, StatsManager
+from tutor import LessonGenerator, LessonSession, LessonWord, StatsManager
 
 
 @pytest.fixture
@@ -68,3 +68,70 @@ def test_exclusion_of_recently_typed_words(stats_manager, lesson_generator):
     ids2 = [w.word_id for w in lesson2]
 
     assert first_word_id not in ids2
+
+
+def test_lesson_session_accuracy_with_backspace(stats_manager):
+    lesson = [LessonWord(word_id=1, original="test", display="Test", separator=" ")]
+    session = LessonSession(lesson, stats_manager)
+
+    # Type correctly 'T'
+    session.handle_key(ord("T"))
+    cps, acc = session.get_stats()
+    assert acc == 100.0
+    assert session.total_typed_count == 1
+
+    # Type mistake 'x' instead of 'e'
+    session.handle_key(ord("x"))
+    cps, acc = session.get_stats()
+    assert acc == 50.0  # 1 correct, 1 mistake. Total 2. (2-1)/2 * 100 = 50.
+    assert session.total_typed_count == 2
+    assert session.mistakes_count == 1
+
+    # Backspace
+    session.handle_key(127)  # Backspace
+    assert len(session.typed_text) == 1
+    assert session.total_typed_count == 2  # Backspace shouldn't increment total
+
+    # Type mistake again 'y' instead of 'e'
+    session.handle_key(ord("y"))
+    cps, acc = session.get_stats()
+    # Total typed: 1 ('T') + 1 ('x') + 1 ('y') = 3
+    # Mistakes: 1 ('x') + 1 ('y') = 2
+    # Accuracy: (3-2)/3 * 100 = 33.33...
+    assert acc == pytest.approx(33.33, rel=1e-2)
+    assert session.total_typed_count == 3
+    assert session.mistakes_count == 2
+
+    # Backspace
+    session.handle_key(8)  # Another backspace variant
+
+    # Type correctly 'e'
+    session.handle_key(ord("e"))
+    cps, acc = session.get_stats()
+    # Total typed: 3 + 1 ('e') = 4
+    # Mistakes: 2
+    # Accuracy: (4-2)/4 * 100 = 50.0
+    assert acc == 50.0
+    assert session.total_typed_count == 4
+    assert session.mistakes_count == 2
+
+
+def test_lesson_session_mistake_recording_after_backspace(stats_manager):
+    lesson = [LessonWord(word_id=1, original="abc", display="abc", separator=" ")]
+    session = LessonSession(lesson, stats_manager)
+
+    # Type 'a', then mistake 'x' for 'b'
+    session.handle_key(ord("a"))
+    session.handle_key(ord("x"))
+
+    # Backspace and type mistake 'y' for 'b'
+    session.handle_key(127)
+    session.handle_key(ord("y"))
+
+    with sqlite3.connect(stats_manager.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT typed_char FROM mistakes WHERE char_index = 1")
+        rows = cursor.fetchall()
+        assert len(rows) == 2
+        assert rows[0][0] == "x"
+        assert rows[1][0] == "y"
