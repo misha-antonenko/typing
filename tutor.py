@@ -1,5 +1,6 @@
 import curses
 import math
+import os
 import random
 import re
 import sqlite3
@@ -47,6 +48,19 @@ class StatsManager:
             """)
             conn.commit()
 
+        migration_dir = "migrations"
+        if os.path.exists(migration_dir):
+            migrations = sorted(
+                [f for f in os.listdir(migration_dir) if f.endswith(".sql")]
+            )
+            with sqlite3.connect(self.db_path) as conn:
+                for m in migrations:
+                    migration_path = os.path.join(migration_dir, m)
+                    with open(migration_path) as f:
+                        sql = f.read()
+                        conn.executescript(sql)
+                conn.commit()
+
     def record_mistake(self, word: str, index: int, typed_char: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -56,13 +70,29 @@ class StatsManager:
             )
             conn.commit()
 
-    def record_word_typed(self, word_id: int) -> None:
+    def record_lesson(
+        self, timestamp: float, text_required: str, text_typed: str
+    ) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO lesson_history (word_id, timestamp) VALUES (?, ?)",
-                (word_id, time.time()),
+                "INSERT INTO lessons (timestamp, text_required, text_typed) VALUES (?, ?, ?)",
+                (timestamp, text_required, text_typed),
             )
+            lesson_id = cursor.lastrowid
+            assert lesson_id is not None
+            conn.commit()
+            return lesson_id
+
+    def record_lesson_words(self, lesson_id: int, word_ids: list[int]) -> None:
+        now = time.time()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for word_id in word_ids:
+                cursor.execute(
+                    "INSERT INTO lesson_words (lesson_id, word_id, timestamp) VALUES (?, ?, ?)",
+                    (lesson_id, word_id, now),
+                )
             conn.commit()
 
     def get_bigram_weights(self) -> dict[str, float]:
@@ -97,7 +127,7 @@ class StatsManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT word_id FROM lesson_history WHERE timestamp > ?", (cutoff,)
+                "SELECT word_id FROM lesson_words WHERE timestamp > ?", (cutoff,)
             )
             return {row[0] for row in cursor.fetchall()}
 
@@ -238,7 +268,8 @@ class LessonSession:
         self._build_mapping()
 
         self.typed_text = ""
-        self.completed_word_ids: set[int] = set()
+        self.raw_typed_text = ""
+        self.completed_word_ids_ordered: list[int] = []
         self.start_time = start_time if start_time is not None else time.time()
         self.mistakes_count = 0
         self.total_typed_count = 0
@@ -256,6 +287,7 @@ class LessonSession:
     def handle_key(self, ch: int) -> bool:
         """Returns True if the lesson should continue, False if it's finished."""
         if ch in (curses.KEY_BACKSPACE, 127, 8):
+            self.raw_typed_text += "\b"
             if self.typed_text:
                 self.typed_text = self.typed_text[:-1]
             return True
@@ -264,6 +296,7 @@ class LessonSession:
             return True
 
         char_typed = chr(ch)
+        self.raw_typed_text += char_typed
         current_idx = len(self.typed_text)
 
         if current_idx >= len(self.full_text):
@@ -294,10 +327,9 @@ class LessonSession:
         for _, end, wo in self.word_mapping:
             if (
                 len(self.typed_text) == end
-                and wo.word_id not in self.completed_word_ids
+                and wo.word_id not in self.completed_word_ids_ordered
             ):
-                self.stats_manager.record_word_typed(wo.word_id)
-                self.completed_word_ids.add(wo.word_id)
+                self.completed_word_ids_ordered.append(wo.word_id)
                 break
 
         return len(self.typed_text) < len(self.full_text)
@@ -453,6 +485,14 @@ class TutorTUI:
 
             if not session.handle_key(ch):
                 break
+
+        # Record lesson data
+        lesson_id = self.stats_manager.record_lesson(
+            session.start_time, session.full_text, session.raw_typed_text
+        )
+        self.stats_manager.record_lesson_words(
+            lesson_id, session.completed_word_ids_ordered
+        )
 
         return True
 

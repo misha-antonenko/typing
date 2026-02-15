@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 import pytest
 
@@ -61,7 +62,8 @@ def test_exclusion_of_recently_typed_words(stats_manager, lesson_generator):
     first_word_id = lesson1[0].word_id
 
     # Record as typed
-    stats_manager.record_word_typed(first_word_id)
+    lesson_id = stats_manager.record_lesson(time.time(), "test", "test")
+    stats_manager.record_lesson_words(lesson_id, [first_word_id])
 
     # Generate new lesson
     lesson2 = lesson_generator.generate_lesson()
@@ -76,13 +78,13 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type correctly 'T'
     session.handle_key(ord("T"))
-    cps, acc = session.get_stats()
+    _, acc = session.get_stats()
     assert acc == 100.0
     assert session.total_typed_count == 1
 
     # Type mistake 'x' instead of 'e'
     session.handle_key(ord("x"))
-    cps, acc = session.get_stats()
+    _, acc = session.get_stats()
     assert acc == 50.0  # 1 correct, 1 mistake. Total 2. (2-1)/2 * 100 = 50.
     assert session.total_typed_count == 2
     assert session.mistakes_count == 1
@@ -94,7 +96,7 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type mistake again 'y' instead of 'e'
     session.handle_key(ord("y"))
-    cps, acc = session.get_stats()
+    _, acc = session.get_stats()
     # Total typed: 1 ('T') + 1 ('x') + 1 ('y') = 3
     # Mistakes: 1 ('x') + 1 ('y') = 2
     # Accuracy: (3-2)/3 * 100 = 33.33...
@@ -107,7 +109,7 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type correctly 'e'
     session.handle_key(ord("e"))
-    cps, acc = session.get_stats()
+    _, acc = session.get_stats()
     # Total typed: 3 + 1 ('e') = 4
     # Mistakes: 2
     # Accuracy: (4-2)/4 * 100 = 50.0
@@ -135,3 +137,51 @@ def test_lesson_session_mistake_recording_after_backspace(stats_manager):
         assert len(rows) == 2
         assert rows[0][0] == "x"
         assert rows[1][0] == "y"
+
+
+def test_lesson_full_storage(stats_manager):
+    lesson = [
+        LessonWord(word_id=1, original="apple", display="Apple", separator=", "),
+        LessonWord(word_id=2, original="banana", display="Banana", separator="."),
+    ]
+    session = LessonSession(lesson, stats_manager)
+
+    # Full text: "Apple, Banana."
+    # Type "App"
+    for c in "App":
+        session.handle_key(ord(c))
+
+    # Error "o" instead of "l"
+    session.handle_key(ord("o"))
+
+    # Backspace
+    session.handle_key(127)
+
+    # Correct "le, Banana."
+    for c in "le, Banana.":
+        session.handle_key(ord(c))
+
+    # Verify lesson is recorded
+    # We simulate what TutorTUI._run_lesson does
+    lesson_id = stats_manager.record_lesson(
+        session.start_time, session.full_text, session.raw_typed_text
+    )
+    stats_manager.record_lesson_words(lesson_id, session.completed_word_ids_ordered)
+
+    with sqlite3.connect(stats_manager.db_path) as conn:
+        cursor = conn.cursor()
+
+        # Check lessons table
+        cursor.execute("SELECT timestamp, text_required, text_typed FROM lessons")
+        row = cursor.fetchone()
+        assert row[1] == "Apple, Banana."
+        # "App" + "o" + "\b" + "le, Banana."
+        assert row[2] == "Appo\ble, Banana."
+
+        # Check lesson_words table
+        cursor.execute(
+            "SELECT word_id FROM lesson_words WHERE lesson_id = ? ORDER BY id",
+            (lesson_id,),
+        )
+        words = [r[0] for r in cursor.fetchall()]
+        assert words == [1, 2]
