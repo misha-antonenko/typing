@@ -52,6 +52,24 @@ class StatsManager:
                     timestamp REAL
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS lessons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    text_required TEXT NOT NULL,
+                    text_typed TEXT NOT NULL,
+                    duration REAL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS lesson_words (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lesson_id INTEGER,
+                    word_id INTEGER,
+                    timestamp REAL,
+                    FOREIGN KEY (lesson_id) REFERENCES lessons (id)
+                )
+            """)
             conn.commit()
 
     def record_mistake(self, word: str, index: int, typed_char: str) -> None:
@@ -68,9 +86,11 @@ class StatsManager:
     ) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # Store duration as NULL if it's 0 to avoid skewing stats
+            db_duration = duration if duration > 0 else None
             cursor.execute(
                 "INSERT INTO lessons (timestamp, text_required, text_typed, duration) VALUES (?, ?, ?, ?)",
-                (timestamp, text_required, text_typed, duration),
+                (timestamp, text_required, text_typed, db_duration),
             )
             lesson_id = cursor.lastrowid
             assert lesson_id is not None
@@ -287,8 +307,6 @@ class LessonGenerator:
                 processed = title.capitalize()
             elif mode == 1:
                 processed = title.upper()
-            elif mode == 2:
-                processed = title.lower()
             else:
                 processed = title
 
