@@ -593,11 +593,6 @@ class TutorTUI:
 
 
 def main() -> None:
-    # Run migrations before starting
-    from scripts.migrate import run_migrations
-
-    run_migrations()
-
     stats_mgr = StatsManager()
     lesson_gen = LessonGenerator(stats_mgr)
     tui = TutorTUI(stats_mgr, lesson_gen)
