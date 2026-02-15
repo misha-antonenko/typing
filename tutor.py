@@ -17,6 +17,13 @@ EXCLUDE_RECENT_MINUTES = 5
 
 
 @dataclass(frozen=True)
+class SessionStats:
+    cps: float
+    accuracy: float
+    duration: float
+
+
+@dataclass(frozen=True)
 class LessonWord:
     word_id: int
     original: str
@@ -393,8 +400,8 @@ class LessonSession:
 
         return len(self.typed_text) < len(self.full_text)
 
-    def get_stats(self) -> tuple[float, float, float]:
-        """Returns (cps, accuracy, duration)."""
+    def get_stats(self) -> SessionStats:
+        """Returns session statistics."""
         duration = time.time() - self.start_time
         cps = len(self.typed_text) / duration if duration > 0 else 0
         accuracy = (
@@ -406,7 +413,7 @@ class LessonSession:
             if self.total_typed_count > 0
             else 100.0
         )
-        return cps, accuracy, duration
+        return SessionStats(cps=cps, accuracy=accuracy, duration=duration)
 
 
 class TutorTUI:
@@ -492,8 +499,8 @@ class TutorTUI:
             h, w = stdscr.getmaxyx()
 
             # Draw stats
-            cps, accuracy, duration = session.get_stats()
-            stats_str = f" CPS: {cps:4.1f} | Accuracy: {accuracy:3.0f}% "
+            stats = session.get_stats()
+            stats_str = f" CPS: {stats.cps:4.1f} | Accuracy: {stats.accuracy:3.0f}% "
             if ema_cps is not None and ema_acc is not None:
                 stats_str += f"| EMA CPS: {ema_cps:4.1f} | EMA Acc: {ema_acc:3.0f}% "
             try:
@@ -549,9 +556,12 @@ class TutorTUI:
                 break
 
         # Record lesson data
-        cps, accuracy, duration = session.get_stats()
+        stats = session.get_stats()
         lesson_id = self.stats_manager.record_lesson(
-            session.start_time, session.full_text, session.raw_typed_text, duration
+            session.start_time,
+            session.full_text,
+            session.raw_typed_text,
+            stats.duration,
         )
         self.stats_manager.record_lesson_words(
             lesson_id, session.completed_word_ids_ordered
