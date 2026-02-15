@@ -185,3 +185,29 @@ def test_lesson_full_storage(stats_manager):
         )
         words = [r[0] for r in cursor.fetchall()]
         assert words == [1, 2]
+
+
+def test_ascii_only_sampling(tmp_path):
+    # Create a dummy dictionary DB with ASCII and non-ASCII words
+    dict_db_path = tmp_path / "test_dict.db"
+    with sqlite3.connect(dict_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE articles (word_id INTEGER PRIMARY KEY, title TEXT)"
+        )
+        cursor.execute("CREATE INDEX idx_title ON articles (title)")
+        cursor.execute(
+            "INSERT INTO articles (word_id, title) VALUES (1, 'apple'), (2, 'abbé'), (3, 'banana'), (4, 'açai')"
+        )
+        conn.commit()
+
+    stats_manager = StatsManager(str(tmp_path / "test_stats.db"))
+    generator = LessonGenerator(stats_manager, dict_db_path=str(dict_db_path))
+
+    # Sample many times to be sure
+    for _ in range(10):
+        lesson = generator.generate_lesson()
+        for word in lesson:
+            # Check if any word contains non-ASCII characters
+            assert word.original.isascii(), f"Word '{word.original}' is not ASCII"
+            assert word.original in ("apple", "banana")

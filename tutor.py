@@ -167,11 +167,12 @@ class LessonGenerator:
     ) -> list[tuple[int, str]]:
         with sqlite3.connect(self.dict_db_path) as conn:
             cursor = conn.cursor()
-            query = "SELECT word_id, title FROM articles"
+            # exclude non-acii
+            query = "SELECT word_id, title FROM articles WHERE LENGTH(title) = LENGTH(CAST(title AS BLOB))"
             params: list[Any] = []
             if exclude_ids:
                 placeholders = ",".join(["?"] * len(exclude_ids))
-                query += f" WHERE word_id NOT IN ({placeholders})"
+                query += f" AND word_id NOT IN ({placeholders})"
                 params.extend(exclude_ids)
             query += " ORDER BY RANDOM() LIMIT ?"
             params.append(count)
@@ -201,6 +202,7 @@ class LessonGenerator:
                     FROM bigram_frequency b
                     JOIN articles a ON b.word_id = a.word_id
                     WHERE b.bigram = ? 
+                    AND LENGTH(a.title) = LENGTH(CAST(a.title AS BLOB))
                 """
                 params: list[Any] = [bg]
                 if used_word_ids:
