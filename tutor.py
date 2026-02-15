@@ -1,6 +1,5 @@
 import curses
 import math
-import os
 import random
 import re
 import sqlite3
@@ -54,19 +53,6 @@ class StatsManager:
                 )
             """)
             conn.commit()
-
-        migration_dir = "migrations"
-        if os.path.exists(migration_dir):
-            migrations = sorted(
-                [f for f in os.listdir(migration_dir) if f.endswith(".sql")]
-            )
-            with sqlite3.connect(self.db_path) as conn:
-                for m in migrations:
-                    migration_path = os.path.join(migration_dir, m)
-                    with open(migration_path) as f:
-                        sql = f.read()
-                        conn.executescript(sql)
-                conn.commit()
 
     def record_mistake(self, word: str, index: int, typed_char: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
@@ -571,6 +557,11 @@ class TutorTUI:
 
 
 def main() -> None:
+    # Run migrations before starting
+    from scripts.migrate import run_migrations
+
+    run_migrations()
+
     stats_mgr = StatsManager()
     lesson_gen = LessonGenerator(stats_mgr)
     tui = TutorTUI(stats_mgr, lesson_gen)
