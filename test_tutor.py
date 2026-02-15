@@ -62,7 +62,7 @@ def test_exclusion_of_recently_typed_words(stats_manager, lesson_generator):
     first_word_id = lesson1[0].word_id
 
     # Record as typed
-    lesson_id = stats_manager.record_lesson(time.time(), "test", "test")
+    lesson_id = stats_manager.record_lesson(time.time(), "test", "test", 1.0)
     stats_manager.record_lesson_words(lesson_id, [first_word_id])
 
     # Generate new lesson
@@ -78,13 +78,13 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type correctly 'T'
     session.handle_key(ord("T"))
-    _, acc = session.get_stats()
+    _, acc, _ = session.get_stats()
     assert acc == 100.0
     assert session.total_typed_count == 1
 
     # Type mistake 'x' instead of 'e'
     session.handle_key(ord("x"))
-    _, acc = session.get_stats()
+    _, acc, _ = session.get_stats()
     assert acc == 50.0  # 1 correct, 1 mistake. Total 2. (2-1)/2 * 100 = 50.
     assert session.total_typed_count == 2
     assert session.mistakes_count == 1
@@ -96,7 +96,7 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type mistake again 'y' instead of 'e'
     session.handle_key(ord("y"))
-    _, acc = session.get_stats()
+    _, acc, _ = session.get_stats()
     # Total typed: 1 ('T') + 1 ('x') + 1 ('y') = 3
     # Mistakes: 1 ('x') + 1 ('y') = 2
     # Accuracy: (3-2)/3 * 100 = 33.33...
@@ -109,7 +109,7 @@ def test_lesson_session_accuracy_with_backspace(stats_manager):
 
     # Type correctly 'e'
     session.handle_key(ord("e"))
-    _, acc = session.get_stats()
+    _, acc, _ = session.get_stats()
     # Total typed: 3 + 1 ('e') = 4
     # Mistakes: 2
     # Accuracy: (4-2)/4 * 100 = 50.0
@@ -161,10 +161,11 @@ def test_lesson_full_storage(stats_manager):
     for c in "le, Banana.":
         session.handle_key(ord(c))
 
-    # Verify lesson is recorded
+    # Record lesson is recorded
     # We simulate what TutorTUI._run_lesson does
+    _, _, duration = session.get_stats()
     lesson_id = stats_manager.record_lesson(
-        session.start_time, session.full_text, session.raw_typed_text
+        session.start_time, session.full_text, session.raw_typed_text, duration
     )
     stats_manager.record_lesson_words(lesson_id, session.completed_word_ids_ordered)
 
@@ -211,3 +212,23 @@ def test_ascii_only_sampling(tmp_path):
             # Check if any word contains non-ASCII characters
             assert word.original.isascii(), f"Word '{word.original}' is not ASCII"
             assert word.original in ("apple", "banana")
+
+
+def test_ema_calculation(stats_manager):
+    # Record two lessons
+    now = time.time()
+    # Lesson 1: 100% accuracy, 10 CPS, 1 week ago
+    one_week = 7 * 24 * 3600
+    stats_manager.record_lesson(now - one_week, "abc", "abc", 0.3)  # CPS = 3/0.3 = 10
+    # Lesson 2: 50% accuracy, 20 CPS, now
+    stats_manager.record_lesson(now, "abcd", "axcy", 0.2)  # CPS = 4/0.2 = 20
+
+    ema_cps, ema_acc = stats_manager.get_ema_stats()
+
+    # Weight for lesson 1: exp(-1) = 0.367879
+    # Weight for lesson 2: exp(0) = 1.0
+    # Expected EMA CPS: (10 * 0.367879 + 20 * 1) / (0.367879 + 1) = 23.67879 / 1.367879 = 17.31
+    # Expected EMA Acc: (100 * 0.367879 + 50 * 1) / (0.367879 + 1) = 86.7879 / 1.367879 = 63.45
+
+    assert ema_cps == pytest.approx(17.31, rel=1e-2)
+    assert ema_acc == pytest.approx(63.45, rel=1e-2)

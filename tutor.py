@@ -71,13 +71,13 @@ class StatsManager:
             conn.commit()
 
     def record_lesson(
-        self, timestamp: float, text_required: str, text_typed: str
+        self, timestamp: float, text_required: str, text_typed: str, duration: float
     ) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO lessons (timestamp, text_required, text_typed) VALUES (?, ?, ?)",
-                (timestamp, text_required, text_typed),
+                "INSERT INTO lessons (timestamp, text_required, text_typed, duration) VALUES (?, ?, ?, ?)",
+                (timestamp, text_required, text_typed, duration),
             )
             lesson_id = cursor.lastrowid
             assert lesson_id is not None
@@ -130,6 +130,63 @@ class StatsManager:
                 "SELECT word_id FROM lesson_words WHERE timestamp > ?", (cutoff,)
             )
             return {row[0] for row in cursor.fetchall()}
+
+    def get_ema_stats(self) -> tuple[float | None, float | None]:
+        """Returns (ema_cps, ema_accuracy)."""
+        now = time.time()
+        one_week = 7 * 24 * 3600
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT timestamp, text_required, text_typed, duration FROM lessons WHERE duration IS NOT NULL"
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
+            return None, None
+
+        total_weight = 0.0
+        weighted_cps = 0.0
+        weighted_accuracy = 0.0
+
+        for ts, text_required, text_typed, duration in rows:
+            # Reconstruct accuracy
+            # We need to count mistakes in text_typed compared to text_required
+            # Similar to LessonSession logic
+            mistakes = 0
+            total_typed = 0
+            # text_typed may contain backspaces
+            processed_typed = ""
+            raw_typed_list = list(text_typed)
+            for char in raw_typed_list:
+                if char == "\b":
+                    if processed_typed:
+                        processed_typed = processed_typed[:-1]
+                else:
+                    total_typed += 1
+                    if len(processed_typed) < len(text_required):
+                        if char != text_required[len(processed_typed)]:
+                            mistakes += 1
+                    processed_typed += char
+
+            if total_typed == 0:
+                continue
+
+            accuracy = ((total_typed - mistakes) / total_typed) * 100
+            cps = len(processed_typed) / duration if duration > 0 else 0
+
+            t_weeks = (ts - now) / one_week
+            weight = math.exp(t_weeks)
+
+            total_weight += weight
+            weighted_cps += cps * weight
+            weighted_accuracy += accuracy * weight
+
+        if total_weight == 0:
+            return None, None
+
+        return weighted_cps / total_weight, weighted_accuracy / total_weight
 
 
 class LessonGenerator:
@@ -336,10 +393,10 @@ class LessonSession:
 
         return len(self.typed_text) < len(self.full_text)
 
-    def get_stats(self) -> tuple[float, float]:
-        """Returns (cps, accuracy)."""
-        elapsed = time.time() - self.start_time
-        cps = len(self.typed_text) / elapsed if elapsed > 0 else 0
+    def get_stats(self) -> tuple[float, float, float]:
+        """Returns (cps, accuracy, duration)."""
+        duration = time.time() - self.start_time
+        cps = len(self.typed_text) / duration if duration > 0 else 0
         accuracy = (
             (
                 (self.total_typed_count - self.mistakes_count)
@@ -349,7 +406,7 @@ class LessonSession:
             if self.total_typed_count > 0
             else 100.0
         )
-        return cps, accuracy
+        return cps, accuracy, duration
 
 
 class TutorTUI:
@@ -428,14 +485,17 @@ class TutorTUI:
 
     def _run_lesson(self, stdscr: Any, lesson: list[LessonWord]) -> bool:
         session = LessonSession(lesson, self.stats_manager)
+        ema_cps, ema_acc = self.stats_manager.get_ema_stats()
 
         while True:
             stdscr.erase()
             h, w = stdscr.getmaxyx()
 
             # Draw stats
-            cps, accuracy = session.get_stats()
+            cps, accuracy, duration = session.get_stats()
             stats_str = f" CPS: {cps:4.1f} | Accuracy: {accuracy:3.0f}% "
+            if ema_cps is not None and ema_acc is not None:
+                stats_str += f"| EMA CPS: {ema_cps:4.1f} | EMA Acc: {ema_acc:3.0f}% "
             try:
                 stdscr.addstr(
                     0, max(0, w - len(stats_str) - 2), stats_str, curses.A_REVERSE
@@ -489,8 +549,9 @@ class TutorTUI:
                 break
 
         # Record lesson data
+        cps, accuracy, duration = session.get_stats()
         lesson_id = self.stats_manager.record_lesson(
-            session.start_time, session.full_text, session.raw_typed_text
+            session.start_time, session.full_text, session.raw_typed_text, duration
         )
         self.stats_manager.record_lesson_words(
             lesson_id, session.completed_word_ids_ordered
