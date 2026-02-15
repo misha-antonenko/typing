@@ -84,13 +84,13 @@ class StatsManager:
     def record_lesson(
         self, timestamp: float, text_required: str, text_typed: str, duration: float
     ) -> int:
+        assert timestamp
+        assert duration
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            # Store duration as NULL if it's 0 to avoid skewing stats
-            db_duration = duration if duration > 0 else None
             cursor.execute(
                 "INSERT INTO lessons (timestamp, text_required, text_typed, duration) VALUES (?, ?, ?, ?)",
-                (timestamp, text_required, text_typed, db_duration),
+                (timestamp, text_required, text_typed, duration),
             )
             lesson_id = cursor.lastrowid
             assert lesson_id is not None
@@ -340,7 +340,7 @@ class LessonSession:
         self.typed_text = ""
         self.raw_typed_text = ""
         self.completed_word_ids_ordered: list[int] = []
-        self.start_time = start_time if start_time is not None else time.time()
+        self.start_time = start_time
         self.mistakes_count = 0
         self.total_typed_count = 0
 
@@ -356,6 +356,9 @@ class LessonSession:
 
     def handle_key(self, ch: int) -> bool:
         """Returns True if the lesson should continue, False if it's finished."""
+        if self.start_time is None:
+            self.start_time = time.time()
+
         if ch in (curses.KEY_BACKSPACE, 127, 8):
             self.raw_typed_text += "\b"
             if self.typed_text:
@@ -406,6 +409,9 @@ class LessonSession:
 
     def get_stats(self) -> SessionStats:
         """Returns session statistics."""
+        if self.start_time is None:
+            raise ValueError("session was not started")
+
         duration = time.time() - self.start_time
         cps = len(self.typed_text) / duration if duration > 0 else 0
         accuracy = (
@@ -503,8 +509,14 @@ class TutorTUI:
             h, w = stdscr.getmaxyx()
 
             # Draw stats
-            stats = session.get_stats()
-            stats_str = f" CPS: {stats.cps:4.1f} | Accuracy: {stats.accuracy:3.0f}% "
+            try:
+                stats = session.get_stats()
+                stats_str = (
+                    f" CPS: {stats.cps:4.1f} | Accuracy: {stats.accuracy:3.0f}% "
+                )
+            except ValueError:
+                stats_str = " Let's go! "
+
             if ema_cps is not None and ema_acc is not None:
                 stats_str += f"| EMA CPS: {ema_cps:4.1f} | EMA Acc: {ema_acc:3.0f}% "
             try:
@@ -559,13 +571,19 @@ class TutorTUI:
             if not session.handle_key(ch):
                 break
 
+        if session.start_time is None:
+            # Was not started
+            return True
+
         # Record lesson data
         stats = session.get_stats()
+        duration = stats.duration
+
         lesson_id = self.stats_manager.record_lesson(
             session.start_time,
             session.full_text,
             session.raw_typed_text,
-            stats.duration,
+            duration,
         )
         self.stats_manager.record_lesson_words(
             lesson_id, session.completed_word_ids_ordered

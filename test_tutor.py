@@ -232,3 +232,27 @@ def test_ema_calculation(stats_manager):
 
     assert ema_cps == pytest.approx(17.31, rel=1e-2)
     assert ema_acc == pytest.approx(63.45, rel=1e-2)
+
+
+def test_lesson_session_delayed_start_time(stats_manager):
+    lesson = [LessonWord(word_id=1, original="a", display="a", separator=" ")]
+    session = LessonSession(lesson, stats_manager)
+
+    # Initially start_time should be None
+    assert session.start_time is None
+
+    # Stats should raise ValueError before session starts
+    with pytest.raises(ValueError, match="session was not started"):
+        session.get_stats()
+
+    # Type first key
+    time.sleep(0.01)  # Ensure some time passes
+    session.handle_key(ord("a"))
+
+    # Now start_time should be set
+    assert session.start_time is not None
+    assert session.start_time <= time.time()
+
+    # Duration should now be > 0
+    stats = session.get_stats()
+    assert stats.duration > 0
