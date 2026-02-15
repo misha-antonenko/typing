@@ -1,6 +1,6 @@
+import logging
 import os
 import sqlite3
-import logging
 
 # Configure logging
 logging.basicConfig(
