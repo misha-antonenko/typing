@@ -15,11 +15,44 @@ WORDS_PER_LESSON = 10
 EXCLUDE_RECENT_MINUTES = 5
 
 
+def compute_arrhythmicity(timestamps_ns: list[int]) -> float | None:
+    """
+    Computes arrhythmicity (standard deviation of inter-key intervals) from a list
+    of monotonic nanosecond timestamps.
+
+    Args:
+        timestamps_ns: List of timestamps in nanoseconds.
+
+    Returns:
+        Standard deviation in seconds, or None if fewer than 2 intervals (3 timestamps).
+        Uses Bessel's correction (DDoF=1).
+    """
+    if len(timestamps_ns) < 3:
+        # We need at least 2 intervals to compute variance of intervals.
+        # 2 timestamps -> 1 interval -> variance undefined (or 0 if population).
+        # Standard deviation of a single sample is undefined for DDoF=1.
+        return None
+
+    intervals = []
+    for i in range(len(timestamps_ns) - 1):
+        # Convert nanoseconds to seconds
+        dt = (timestamps_ns[i + 1] - timestamps_ns[i]) / 1e9
+        intervals.append(dt)
+
+    if len(intervals) < 2:
+        return None
+
+    mean_val = sum(intervals) / len(intervals)
+    variance = sum((x - mean_val) ** 2 for x in intervals) / (len(intervals) - 1)
+    return math.sqrt(variance)
+
+
 @dataclass(frozen=True)
 class SessionStats:
     cps: float
     accuracy: float
     duration: float
+    arrhythmicity: float | None
 
 
 @dataclass(frozen=True)
@@ -70,6 +103,14 @@ class StatsManager:
                     FOREIGN KEY (lesson_id) REFERENCES lessons (id)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS key_presses (
+                    lesson_id INTEGER,
+                    char_index INTEGER,
+                    timestamp INTEGER,
+                    FOREIGN KEY (lesson_id) REFERENCES lessons (id)
+                )
+            """)
             conn.commit()
 
     def record_mistake(self, word: str, index: int, typed_char: str) -> None:
@@ -82,8 +123,15 @@ class StatsManager:
             conn.commit()
 
     def record_lesson(
-        self, timestamp: float, text_required: str, text_typed: str, duration: float
+        self,
+        timestamp: float,
+        text_required: str,
+        text_typed: str,
+        duration: float,
+        key_presses: list[tuple[int, int]] | None = None,
     ) -> int:
+        if key_presses is None:
+            key_presses = []
         assert timestamp
         assert duration
         with sqlite3.connect(self.db_path) as conn:
@@ -94,6 +142,11 @@ class StatsManager:
             )
             lesson_id = cursor.lastrowid
             assert lesson_id is not None
+            if key_presses:
+                cursor.executemany(
+                    "INSERT INTO key_presses (lesson_id, char_index, timestamp) VALUES (?, ?, ?)",
+                    [(lesson_id, idx, ts) for idx, ts in key_presses],
+                )
             conn.commit()
             return lesson_id
 
@@ -144,26 +197,40 @@ class StatsManager:
             )
             return {row[0] for row in cursor.fetchall()}
 
-    def get_ema_stats(self) -> tuple[float | None, float | None]:
-        """Returns (ema_cps, ema_accuracy)."""
+    def get_ema_stats(self) -> tuple[float | None, float | None, float | None]:
+        """Returns (ema_cps, ema_accuracy, ema_arrhythmicity)."""
         now = time.time()
         one_week = 7 * 24 * 3600
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT timestamp, text_required, text_typed, duration FROM lessons WHERE duration IS NOT NULL"
+                "SELECT id, timestamp, text_required, text_typed, duration FROM lessons WHERE duration IS NOT NULL"
             )
             rows = cursor.fetchall()
 
+            cursor.execute(
+                "SELECT lesson_id, timestamp FROM key_presses ORDER BY lesson_id, timestamp ASC"
+            )
+            kp_rows = cursor.fetchall()
+
         if not rows:
-            return None, None
+            return None, None, None
+
+        # Group key presses
+        from collections import defaultdict
+
+        kp_map = defaultdict(list)
+        for lid, ts in kp_rows:
+            kp_map[lid].append(ts)
 
         total_weight = 0.0
         weighted_cps = 0.0
         weighted_accuracy = 0.0
+        weighted_arrhythmicity = 0.0
+        total_weight_arr = 0.0
 
-        for ts, text_required, text_typed, duration in rows:
+        for lesson_id, ts, text_required, text_typed, duration in rows:
             # Reconstruct accuracy
             # We need to count mistakes in text_typed compared to text_required
             # Similar to LessonSession logic
@@ -189,6 +256,12 @@ class StatsManager:
             accuracy = ((total_typed - mistakes) / total_typed) * 100
             cps = len(processed_typed) / duration if duration > 0 else 0
 
+            # Arrhythmicity calculation
+            ts_ns_list = kp_map.get(lesson_id)
+            arrhythmicity = None
+            if ts_ns_list:
+                arrhythmicity = compute_arrhythmicity(ts_ns_list)
+
             t_weeks = (ts - now) / one_week
             weight = math.exp(t_weeks)
 
@@ -196,10 +269,17 @@ class StatsManager:
             weighted_cps += cps * weight
             weighted_accuracy += accuracy * weight
 
-        if total_weight == 0:
-            return None, None
+            if arrhythmicity is not None:
+                total_weight_arr += weight
+                weighted_arrhythmicity += arrhythmicity * weight
 
-        return weighted_cps / total_weight, weighted_accuracy / total_weight
+        if total_weight == 0:
+            return None, None, None
+
+        ema_arr = (
+            weighted_arrhythmicity / total_weight_arr if total_weight_arr > 0 else None
+        )
+        return weighted_cps / total_weight, weighted_accuracy / total_weight, ema_arr
 
 
 class LessonGenerator:
@@ -341,6 +421,7 @@ class LessonSession:
         self.raw_typed_text = ""
         self.completed_word_ids_ordered: list[int] = []
         self.start_time = start_time
+        self.key_presses: list[tuple[int, int]] = []
         self.mistakes_count = 0
         self.total_typed_count = 0
 
@@ -356,8 +437,12 @@ class LessonSession:
 
     def handle_key(self, ch: int) -> bool:
         """Returns True if the lesson should continue, False if it's finished."""
+        # first thing we measure the time
+        ts = time.perf_counter_ns()
         if self.start_time is None:
             self.start_time = time.time()
+
+        self.key_presses.append((len(self.raw_typed_text), ts))
 
         if ch in (curses.KEY_BACKSPACE, 127, 8):
             self.raw_typed_text += "\b"
@@ -412,7 +497,11 @@ class LessonSession:
         if self.start_time is None:
             raise ValueError("session was not started")
 
-        duration = time.time() - self.start_time
+        duration = (
+            (self.key_presses[-1][1] - self.key_presses[0][1]) / 1e9
+            if len(self.key_presses) > 1
+            else time.time() - self.start_time
+        )
         cps = len(self.typed_text) / duration if duration > 0 else 0
         accuracy = (
             (
@@ -423,7 +512,18 @@ class LessonSession:
             if self.total_typed_count > 0
             else 100.0
         )
-        return SessionStats(cps=cps, accuracy=accuracy, duration=duration)
+
+        arrhythmicity = None
+        if self.key_presses:
+            timestamps = [ts for _, ts in self.key_presses]
+            arrhythmicity = compute_arrhythmicity(timestamps)
+
+        return SessionStats(
+            cps=cps,
+            accuracy=accuracy,
+            duration=duration,
+            arrhythmicity=arrhythmicity,
+        )
 
 
 class TutorTUI:
@@ -502,7 +602,7 @@ class TutorTUI:
 
     def _run_lesson(self, stdscr: Any, lesson: list[LessonWord]) -> bool:
         session = LessonSession(lesson, self.stats_manager)
-        ema_cps, ema_acc = self.stats_manager.get_ema_stats()
+        ema_cps, ema_acc, ema_arr = self.stats_manager.get_ema_stats()
 
         while True:
             stdscr.erase()
@@ -514,11 +614,17 @@ class TutorTUI:
                 stats_str = (
                     f" CPS: {stats.cps:4.1f} | Accuracy: {stats.accuracy:3.0f}% "
                 )
+                if stats.arrhythmicity is not None:
+                    stats_str += f"| Arr: {stats.arrhythmicity:.3f}s "
             except ValueError:
                 stats_str = " Let's go! "
 
             if ema_cps is not None and ema_acc is not None:
                 stats_str += f"| EMA CPS: {ema_cps:4.1f} | EMA Acc: {ema_acc:3.0f}% "
+
+            if ema_arr is not None:
+                stats_str += f"| EMA Arr: {ema_arr:.3f}s "
+
             try:
                 stdscr.addstr(
                     0, max(0, w - len(stats_str) - 2), stats_str, curses.A_REVERSE
@@ -584,6 +690,7 @@ class TutorTUI:
             session.full_text,
             session.raw_typed_text,
             duration,
+            session.key_presses,
         )
         self.stats_manager.record_lesson_words(
             lesson_id, session.completed_word_ids_ordered

@@ -223,7 +223,7 @@ def test_ema_calculation(stats_manager):
     # Lesson 2: 50% accuracy, 20 CPS, now
     stats_manager.record_lesson(now, "abcd", "axcy", 0.2)  # CPS = 4/0.2 = 20
 
-    ema_cps, ema_acc = stats_manager.get_ema_stats()
+    ema_cps, ema_acc, _ = stats_manager.get_ema_stats()
 
     # Weight for lesson 1: exp(-1) = 0.367879
     # Weight for lesson 2: exp(0) = 1.0
@@ -253,6 +253,91 @@ def test_lesson_session_delayed_start_time(stats_manager):
     assert session.start_time is not None
     assert session.start_time <= time.time()
 
-    # Duration should now be > 0
+
+def test_key_press_storage(stats_manager):
+    lesson = [LessonWord(word_id=1, original="test", display="Test", separator=" ")]
+    session = LessonSession(lesson, stats_manager)
+
+    # Simulate a few key presses
+    session.handle_key(ord("T"))
+    time.sleep(0.01)
+    session.handle_key(ord("e"))
+
+    assert len(session.key_presses) == 2
+    assert session.key_presses[0][0] == 0  # Index 0
+    assert session.key_presses[1][0] == 1  # Index 1
+    assert session.key_presses[0][1] < session.key_presses[1][1]  # Timestamp order
+
+    # Save lesson
     stats = session.get_stats()
-    assert stats.duration > 0
+    lesson_id = stats_manager.record_lesson(
+        session.start_time,
+        session.full_text,
+        session.raw_typed_text,
+        stats.duration,
+        session.key_presses,
+    )
+
+    with sqlite3.connect(stats_manager.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT char_index, timestamp FROM key_presses WHERE lesson_id=?",
+            (lesson_id,),
+        )
+        rows = cursor.fetchall()
+        assert len(rows) == 2
+        assert rows[0][0] == 0
+        assert rows[1][0] == 1
+        assert rows[0][1] == session.key_presses[0][1]
+
+
+def test_arrhythmicity_calculation(stats_manager):
+    lesson = [LessonWord(word_id=1, original="test", display="Test", separator=" ")]
+    session = LessonSession(lesson, stats_manager)
+
+    # 1 key press -> None
+    session.handle_key(ord("T"))
+    assert session.get_stats().arrhythmicity is None
+
+    # 2 key presses -> 0.0 (variance of single interval is 0)
+    session.handle_key(ord("e"))
+    # Mock key presses to have specific timestamps for predictability
+    t1 = 1000000000
+    t2 = 1200000000  # +0.2s
+    session.key_presses = [(0, t1), (1, t2)]
+    # 2 key presses -> 1 interval. DDoF=1 -> undefined (None).
+    # Previous DDoF=0 -> 0.0.
+    assert session.get_stats().arrhythmicity is None
+
+    # 3 key presses
+    t3 = 1500000000  # +0.3s from t2
+    session.key_presses = [(0, t1), (1, t2), (2, t3)]
+    # Intervals: 0.2, 0.3
+    # Mean: 0.25
+    # Variance (sample): ((0.2-0.25)^2 + (0.3-0.25)^2) / (2-1) = 0.005
+    # Stddev: sqrt(0.005) approx 0.0707
+    assert session.get_stats().arrhythmicity == pytest.approx(0.0707, rel=1e-2)
+
+
+def test_ema_arrhythmicity(stats_manager):
+    # Record a lesson with known arrhythmicity
+    t1 = 1000000000
+    t2 = 1200000000  # 0.2
+    t3 = 1500000000  # 0.3
+    # Arr = sqrt(0.005) approx 0.0707
+    kp1 = [(0, t1), (1, t2), (2, t3)]
+    stats_manager.record_lesson(time.time(), "test", "test", 1.0, kp1)
+
+    # Record another lesson with different arrhythmicity
+    t4 = 2000000000
+    t5 = 2100000000  # 0.1
+    t6 = 2200000000  # 0.1
+    # Intervals: 0.1, 0.1. Mean 0.1. Var 0. Arr 0.
+    kp2 = [(0, t4), (1, t5), (2, t6)]
+    stats_manager.record_lesson(time.time(), "test", "test", 1.0, kp2)
+
+    cps, acc, arr = stats_manager.get_ema_stats()
+
+    # Both lessons are "now" (same weight 1.0)
+    # Average of 0.0707 and 0.0 = 0.03535
+    assert arr == pytest.approx(0.03535, rel=1e-2)
