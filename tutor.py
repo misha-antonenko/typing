@@ -382,11 +382,11 @@ class LessonGenerator:
 
         for word_id, title in words:
             # Random capitalization
-            mode = random.randint(0, 3)
+            mode = random.randint(0, 8)
             if mode == 0:
-                processed = title.capitalize()
-            elif mode == 1:
                 processed = title.upper()
+            elif mode == 1:
+                processed = title[0].upper() + title[1:]
             else:
                 processed = title
 
