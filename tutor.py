@@ -612,7 +612,7 @@ class TutorTUI:
             try:
                 stats = session.get_stats()
                 stats_str = (
-                    f" CPS: {stats.cps:4.1f} | Accuracy: {stats.accuracy:3.0f}% "
+                    f" CPS: {stats.cps:4.2f} | Accuracy: {stats.accuracy:3.1f}% "
                 )
                 if stats.arrhythmicity is not None:
                     stats_str += f"| Arr: {stats.arrhythmicity:.3f}s "
@@ -620,7 +620,7 @@ class TutorTUI:
                 stats_str = " Let's go! "
 
             if ema_cps is not None and ema_acc is not None:
-                stats_str += f"| EMA CPS: {ema_cps:4.1f} | EMA Acc: {ema_acc:3.0f}% "
+                stats_str += f"| EMA CPS: {ema_cps:4.2f} | EMA Acc: {ema_acc:3.1f}% "
 
             if ema_arr is not None:
                 stats_str += f"| EMA Arr: {ema_arr:.3f}s "
