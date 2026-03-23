@@ -14,6 +14,8 @@ app = Flask(__name__)
 DB_PATH = Path(__file__).parent.parent / "stats.db"
 ONE_WEEK = 7 * 24 * 3600
 
+TOP_BIGRAMS = 100
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -49,6 +51,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="chart">
+            <div id="bigram-weights"></div>
+        </div>
+        <div class="chart">
             <div id="accuracy-speed"></div>
         </div>
         <div class="chart">
@@ -56,14 +61,27 @@ HTML_TEMPLATE = """
         </div>
     </div>
     <script>
+        var bigramData = {{ bigram_json | safe }};
         var accuracySpeedData = {{ accuracy_speed_json | safe }};
         var dailyStatsData = {{ daily_stats_json | safe }};
+        Plotly.newPlot('bigram-weights', bigramData.data, bigramData.layout);
         Plotly.newPlot('accuracy-speed', accuracySpeedData.data, accuracySpeedData.layout);
         Plotly.newPlot('daily-stats', dailyStatsData.data, dailyStatsData.layout);
     </script>
 </body>
 </html>
 """
+
+
+def get_bigram_weights() -> dict[str, float]:
+    now = __import__("time").time()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT word, char_index, timestamp FROM mistakes").fetchall()
+    weights: dict[str, float] = {}
+    for word, index, ts in rows:
+        bigram = (f"^{word[0].lower()}" if index == 0 else word[index - 1 : index + 1].lower())
+        weights[bigram] = weights.get(bigram, 0) + math.exp((ts - now) / ONE_WEEK)
+    return weights
 
 
 def compute_arrhythmicity(timestamps_ns):
@@ -199,20 +217,15 @@ def apply_exponential_smoothing(daily_stats):
 
 
 def compute_pareto_frontier(stats):
-    """Compute Pareto frontier for accuracy-speed tradeoff."""
+    """Compute Pareto frontier: points not dominated by any other (higher CPS and higher accuracy)."""
     if not stats:
         return [], []
-    
-    # Sort by CPS
-    sorted_stats = sorted(stats, key=lambda s: s["cps"])
-    
-    frontier = []
-    max_accuracy = -1
-    for stat in sorted_stats:
-        if stat["accuracy"] > max_accuracy:
-            frontier.append(stat)
-            max_accuracy = stat["accuracy"]
-    
+
+    frontier = [
+        s for s in stats
+        if not any(o["cps"] >= s["cps"] and o["accuracy"] >= s["accuracy"] and (o["cps"] > s["cps"] or o["accuracy"] > s["accuracy"]) for o in stats)
+    ]
+    frontier.sort(key=lambda s: s["cps"])
     return [s["cps"] for s in frontier], [s["accuracy"] for s in frontier]
 
 
@@ -226,6 +239,7 @@ def index():
             current_cps="N/A",
             current_accuracy="N/A",
             total_lessons=0,
+            bigram_json="{}",
             accuracy_speed_json="{}",
             daily_stats_json="{}",
         )
@@ -236,9 +250,39 @@ def index():
     current_accuracy = f"{last['accuracy']:.1f}"
     total_lessons = len(stats)
 
+    # Bigram EMA weights
+    bw = get_bigram_weights()
+    top_bigrams = sorted(bw.items(), key=lambda x: x[1], reverse=True)[:TOP_BIGRAMS]
+    bigram_fig = go.Figure(go.Treemap(
+        labels=[b for b, _ in top_bigrams],
+        parents=[""] * len(top_bigrams),
+        values=[v for _, v in top_bigrams],
+    ))
+    bigram_fig.update_layout(
+        title=f"Top {TOP_BIGRAMS} bigrams by EMA mistake frequency",
+        height=350,
+    )
+
     # Accuracy vs Speed scatter with Pareto frontier
     pareto_cps, pareto_acc = compute_pareto_frontier(stats)
-    
+
+    import time as _time
+    now = _time.time()
+    ws = [math.exp((s["timestamp"] - now) / ONE_WEEK) for s in stats]
+    total_w = sum(ws)
+    ema_cps_pt = sum(s["cps"] * w for s, w in zip(stats, ws)) / total_w
+    ema_acc_pt = sum(s["accuracy"] * w for s, w in zip(stats, ws)) / total_w
+
+    # Weighted linear regression: accuracy = a * cps + b
+    import numpy as np
+    xs = np.array([s["cps"] for s in stats])
+    ys = np.array([s["accuracy"] for s in stats])
+    coeffs = np.polyfit(xs, ys, 1, w=ws)
+    a, b = coeffs
+    reg_x = [xs.min(), xs.max()]
+    reg_y = [a * reg_x[0] + b, a * reg_x[1] + b]
+    denom = 1  # always valid with polyfit
+
     accuracy_speed = go.Figure()
     accuracy_speed.add_trace(
         go.Scatter(
@@ -260,6 +304,26 @@ def index():
             marker=dict(size=6, color="red"),
             name="Pareto Frontier",
             hovertemplate="CPS: %{x:.2f}<br>Accuracy: %{y:.1f}%<extra></extra>",
+        )
+    )
+    accuracy_speed.add_trace(
+        go.Scatter(
+            x=reg_x,
+            y=reg_y,
+            mode="lines",
+            line=dict(color="orange", width=2),
+            name=f"Regression (slope {a:.2f})",
+            hoverinfo="skip",
+        )
+    )
+    accuracy_speed.add_trace(
+        go.Scatter(
+            x=[ema_cps_pt],
+            y=[ema_acc_pt],
+            mode="markers",
+            marker=dict(size=14, color="yellow", symbol="star", line=dict(color="black", width=1)),
+            name=f"EMA ({ema_cps_pt:.2f} CPS, {ema_acc_pt:.1f}%)",
+            hovertemplate=f"EMA CPS: {ema_cps_pt:.2f}<br>EMA Accuracy: {ema_acc_pt:.1f}%<extra></extra>",
         )
     )
     accuracy_speed.update_layout(
@@ -356,10 +420,12 @@ def index():
         current_cps=current_cps,
         current_accuracy=current_accuracy,
         total_lessons=total_lessons,
+        bigram_json=bigram_fig.to_json(),
         accuracy_speed_json=accuracy_speed.to_json(),
         daily_stats_json=daily_stats.to_json(),
     )
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.config["TRUSTED_HOSTS"] = ["127.0.0.1:5000"]
+    app.run(debug=True, port=5000, host="127.0.0.1")
