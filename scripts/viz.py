@@ -57,15 +57,20 @@ HTML_TEMPLATE = """
             <div id="accuracy-speed"></div>
         </div>
         <div class="chart">
+            <div id="perfect-speeds"></div>
+        </div>
+        <div class="chart">
             <div id="daily-stats"></div>
         </div>
     </div>
     <script>
         var bigramData = {{ bigram_json | safe }};
         var accuracySpeedData = {{ accuracy_speed_json | safe }};
+        var perfectSpeedsData = {{ perfect_speeds_json | safe }};
         var dailyStatsData = {{ daily_stats_json | safe }};
         Plotly.newPlot('bigram-weights', bigramData.data, bigramData.layout);
         Plotly.newPlot('accuracy-speed', accuracySpeedData.data, accuracySpeedData.layout);
+        Plotly.newPlot('perfect-speeds', perfectSpeedsData.data, perfectSpeedsData.layout);
         Plotly.newPlot('daily-stats', dailyStatsData.data, dailyStatsData.layout);
     </script>
 </body>
@@ -241,6 +246,7 @@ def index():
             total_lessons=0,
             bigram_json="{}",
             accuracy_speed_json="{}",
+            perfect_speeds_json="{}",
             daily_stats_json="{}",
         )
 
@@ -264,46 +270,62 @@ def index():
     )
 
     # Accuracy vs Speed scatter with Pareto frontier
-    pareto_cps, pareto_acc = compute_pareto_frontier(stats)
+    perfect = [s for s in stats if s["accuracy"] >= 100.0]
+    imperfect = [s for s in stats if s["accuracy"] < 100.0]
+
+    pareto_cps, pareto_acc = compute_pareto_frontier(imperfect)
 
     import time as _time
     now = _time.time()
-    ws = [math.exp((s["timestamp"] - now) / ONE_WEEK) for s in stats]
+    ws = [math.exp((s["timestamp"] - now) / ONE_WEEK) for s in imperfect]
     total_w = sum(ws)
-    ema_cps_pt = sum(s["cps"] * w for s, w in zip(stats, ws)) / total_w
-    ema_acc_pt = sum(s["accuracy"] * w for s, w in zip(stats, ws)) / total_w
+    ema_cps_pt = sum(s["cps"] * w for s, w in zip(imperfect, ws)) / total_w if total_w else 0
+    ema_acc_pt = sum(s["accuracy"] * w for s, w in zip(imperfect, ws)) / total_w if total_w else 0
 
-    # Weighted linear regression: accuracy = a * cps + b
+    # Transform accuracy to log average streak: log(p/(1-p)) where p = accuracy/100
     import numpy as np
-    xs = np.array([s["cps"] for s in stats])
-    ys = np.array([s["accuracy"] for s in stats])
-    coeffs = np.polyfit(xs, ys, 1, w=ws)
-    a, b = coeffs
-    reg_x = [xs.min(), xs.max()]
-    reg_y = [a * reg_x[0] + b, a * reg_x[1] + b]
-    denom = 1  # always valid with polyfit
+
+    def log_avg_streak(acc_pct):
+        p = acc_pct / 100.0
+        p = max(1e-6, min(1 - 1e-6, p))
+        return math.log(p / (1 - p))
+
+    if imperfect:
+        xs = np.array([s["cps"] for s in imperfect])
+        ys = np.array([log_avg_streak(s["accuracy"]) for s in imperfect])
+        coeffs = np.polyfit(xs, ys, 1, w=ws)
+        a, b = coeffs
+        reg_x = [xs.min(), xs.max()]
+        reg_y = [a * reg_x[0] + b, a * reg_x[1] + b]
+    else:
+        xs, ys = np.array([]), np.array([])
+        a, b = 0, 0
+        reg_x, reg_y = [], []
+
+    pareto_log_acc = [log_avg_streak(acc) for acc in pareto_acc]
+    ema_log_acc = log_avg_streak(ema_acc_pt) if imperfect else 0
 
     accuracy_speed = go.Figure()
     accuracy_speed.add_trace(
         go.Scatter(
-            x=[s["cps"] for s in stats],
-            y=[s["accuracy"] for s in stats],
+            x=[s["cps"] for s in imperfect],
+            y=ys.tolist(),
             mode="markers",
-            marker=dict(size=8, color=[s["timestamp"] for s in stats], colorscale="Viridis"),
-            text=[s["date"].isoformat() for s in stats],
-            hovertemplate="<b>%{text}</b><br>CPS: %{x:.2f}<br>Accuracy: %{y:.1f}%<extra></extra>",
+            marker=dict(size=8, color=[s["timestamp"] for s in imperfect], colorscale="Viridis"),
+            text=[s["date"].isoformat() for s in imperfect],
+            hovertemplate="<b>%{text}</b><br>CPS: %{x:.2f}<br>Log Avg Streak: %{y:.2f}<extra></extra>",
             name="Lessons",
         )
     )
     accuracy_speed.add_trace(
         go.Scatter(
             x=pareto_cps,
-            y=pareto_acc,
+            y=pareto_log_acc,
             mode="lines+markers",
             line=dict(color="red", width=2, dash="dash"),
             marker=dict(size=6, color="red"),
             name="Pareto Frontier",
-            hovertemplate="CPS: %{x:.2f}<br>Accuracy: %{y:.1f}%<extra></extra>",
+            hovertemplate="CPS: %{x:.2f}<br>Log Avg Streak: %{y:.2f}<extra></extra>",
         )
     )
     accuracy_speed.add_trace(
@@ -319,19 +341,37 @@ def index():
     accuracy_speed.add_trace(
         go.Scatter(
             x=[ema_cps_pt],
-            y=[ema_acc_pt],
+            y=[ema_log_acc],
             mode="markers",
             marker=dict(size=14, color="yellow", symbol="star", line=dict(color="black", width=1)),
-            name=f"EMA ({ema_cps_pt:.2f} CPS, {ema_acc_pt:.1f}%)",
-            hovertemplate=f"EMA CPS: {ema_cps_pt:.2f}<br>EMA Accuracy: {ema_acc_pt:.1f}%<extra></extra>",
+            name=f"EMA ({ema_cps_pt:.2f} CPS, {ema_log_acc:.2f})",
+            hovertemplate=f"EMA CPS: {ema_cps_pt:.2f}<br>EMA Log Avg Streak: {ema_log_acc:.2f}<extra></extra>",
         )
     )
     accuracy_speed.update_layout(
-        title="Accuracy vs Speed (with Pareto Frontier)",
+        title="Log Average Streak vs Speed (with Pareto Frontier)",
         xaxis_title="Characters Per Second",
-        yaxis_title="Accuracy (%)",
+        yaxis_title="Log Average Streak  log(p/(1−p))",
         hovermode="closest",
         height=400,
+    )
+
+    # Perfect lessons (100% accuracy) — CPS histogram
+    perfect_fig = go.Figure()
+    if perfect:
+        perfect_fig.add_trace(
+            go.Histogram(
+                x=[s["cps"] for s in perfect],
+                nbinsx=20,
+                name="Perfect Lessons",
+                marker_color="green",
+            )
+        )
+    perfect_fig.update_layout(
+        title=f"Speed Distribution of Perfect Lessons (n={len(perfect)})",
+        xaxis_title="Characters Per Second",
+        yaxis_title="Count",
+        height=350,
     )
 
     # Daily aggregated stats
@@ -422,6 +462,7 @@ def index():
         total_lessons=total_lessons,
         bigram_json=bigram_fig.to_json(),
         accuracy_speed_json=accuracy_speed.to_json(),
+        perfect_speeds_json=perfect_fig.to_json(),
         daily_stats_json=daily_stats.to_json(),
     )
 
